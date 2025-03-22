@@ -1,0 +1,16 @@
+{
+  "gpu_memory": {
+    "GPU_max_mem_allocated_bytes": 4411094528,
+    "GPU_max_memory_reserved_bytes": 6752829440
+  },
+  "gpu_utilisation": {
+    "effective_device": "cuda:0",
+    "physical_device": 0,
+    "gpu_utilization_percent": 28.0
+  },
+  "cpu_utilisation": {
+    "pid": 1498257,
+    "cpu_usage_percent": 0.0,
+    "cpu_memory_usage_bytes": 2973859840
+  }
+}

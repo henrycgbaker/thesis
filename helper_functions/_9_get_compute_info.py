@@ -60,21 +60,17 @@ def get_memory(device):
     torch.cuda.reset_peak_memory_stats(device)
     
     return {
-        "current_memory_allocated_bytes": torch.cuda.memory_allocated(device),
-        "max_memory_allocated_bytes": torch.cuda.max_memory_allocated(device),
-        "current_memory_reserved_bytes": torch.cuda.memory_reserved(device),
-        "max_memory_reserved_bytes": torch.cuda.max_memory_reserved(device),
+        "GPU_max_mem_allocated_bytes": torch.cuda.max_memory_allocated(device),
+        "GPU_max_memory_reserved_bytes": torch.cuda.max_memory_reserved(device),
     }
     
 
-def get_gpu_cpu_utilisation(device):
+def get_global_gpu_usage():
     """
-    Retrieves GPU and CPU utilisation statistics.
+    global, so only need to run on main process!
+    """
+    gpu_utilisation = {}
     
-    Returns:
-      A dictionary with GPU utilization percentages and CPU usage information.
-    """
-    utilisation_info = {}
     # GPU utilization using nvidia-smi
     try:
         result = subprocess.check_output(
@@ -82,39 +78,70 @@ def get_gpu_cpu_utilisation(device):
         )
         lines = result.decode("utf-8").strip().splitlines()
         gpu_utils = [float(line.strip()) for line in lines if line.strip()]
-        utilisation_info["gpu_utilization_percent"] = gpu_utils
+        gpu_utilisation["gpu_utilization_percent"] = gpu_utils
     except Exception as e:
-        utilisation_info["gpu_utilization_percent"] = f"Error: {str(e)}"
-    
-    # CPU utilisation
+        gpu_utilisation["gpu_utilization_percent"] = f"Error: {str(e)}"
+
+    return gpu_utilisation
+
+def get_gpu_utilisation(device):
+    """
+    Returns the GPU utilisation (in percent) for the given torch.device.
+    Adjusts for modifications to CUDA_VISIBLE_DEVICES by mapping the effective device index
+    to the physical GPU index.
+
+    Returns a dictionary with:
+      - 'effective_device': the torch device (e.g. "cuda:0")
+      - 'physical_device': the physical GPU id (if CUDA_VISIBLE_DEVICES is set, else same as effective)
+      - 'gpu_utilization_percent': the utilisation percentage (float)
+    """
+    gpu_utilisation = {}
     try:
-        utilisation_info["cpu_usage_percent"] = psutil.cpu_percent(interval=1.0, percpu=False)
-        process = psutil.Process(os.getpid())
-        utilisation_info["cpu_memory_usage_bytes"] = process.memory_info().rss
+        # Run nvidia-smi to get utilisation for all GPUs.
+        result = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"]
+        )
+        lines = result.decode("utf-8").strip().splitlines()
+        all_gpu_utils = [float(line.strip()) for line in lines if line.strip()]
+
+        # Get the effective device index from torch.device.
+        if isinstance(device, torch.device):
+            effective_index = device.index if device.index is not None else 0
+        else:
+            # If provided as string, try to extract index from "cuda:0"
+            try:
+                effective_index = int(str(device).split("cuda:")[1])
+            except Exception:
+                effective_index = 0
+
+        # Check if CUDA_VISIBLE_DEVICES is set.
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+        if visible is not None:
+            # Map the effective index to the physical GPU id.
+            mapping = [int(x.strip()) for x in visible.split(",") if x.strip()]
+            # In many setups, if CUDA_VISIBLE_DEVICES is set, the CUDA runtime renumbers GPUs to 0,1,...
+            # But to be safe, we return both the effective and physical indices.
+            physical_index = mapping[effective_index] if effective_index < len(mapping) else effective_index
+        else:
+            physical_index = effective_index
+
+        gpu_utilisation["effective_device"] = f"cuda:{effective_index}"
+        gpu_utilisation["physical_device"] = physical_index
+        gpu_utilisation["gpu_utilization_percent"] = float(all_gpu_utils[physical_index])
     except Exception as e:
-        utilisation_info["cpu_usage_percent"] = f"Error: {str(e)}"
+        gpu_utilisation["error"] = f"Error: {str(e)}"
+
+    return gpu_utilisation
+
+
+def get_cpu_utilisation():
     
-    return utilisation_info
+    cpu_utilisation = {}
+    process = psutil.Process(os.getpid())
 
-
-def combine_comp_metrics(model, device, tokenised_input_ids, accelerator):
-    """
-    Combines compute-related metrics: FLOPs, memory stats, and device utilisation.
-    Only process 0 computes FLOPs and utilisation (to avoid duplication).
-    """
-    flops = None
-    utilisation = None
-
-    if accelerator.local_process_index == 0:
-        flops = get_flops(model, tokenised_input_ids)
+    cpu_utilisation["pid"] = process.pid
+    cpu_utilisation["cpu_usage_percent"] = process.cpu_percent(interval=1.0)
+    cpu_utilisation["cpu_memory_usage_bytes"] = process.memory_info().rss
     
-    memory = get_memory(device)
-
-    utilisation = get_gpu_cpu_utilisation(device)
-
-    return {
-        "FLOPs": flops,
-        "Memory": memory,
-        "Compute_utilisation": utilisation,
-    }
-
+    return cpu_utilisation       
+        

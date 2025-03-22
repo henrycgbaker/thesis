@@ -5,6 +5,9 @@ import logging
 import torch.distributed as dist
 import logging
 
+logging.getLogger("codecarbon").setLevel(logging.ERROR)
+logging.basicConfig(level=logging.INFO)
+
 # Adjust paths -> import helper functions
 project_root = os.getcwd()  
 if project_root not in sys.path:
@@ -20,7 +23,7 @@ from _4_setup_energy_tracking import start_energy_tracking, stop_energy_tracking
 from _6_run_inference_by_task import run_gen_inference
 from _7_get_experiment_info import get_experiment_setup, get_experimental_variables, get_model_architecture
 from _8_get_inference_results import combine_inference_metrics
-from _9_get_compute_info import combine_comp_metrics
+from _9_get_compute_info import get_flops, get_memory, get_gpu_utilisation, get_cpu_utilisation, get_global_gpu_usage
 from _10_get_energy_metrics import combine_energy_metrics
 from _11_aggregate_experiment_results import aggregate_results
 from _12_save_results import save_raw_results, save_final_results
@@ -128,34 +131,50 @@ class ExperimentRunner:
         self.model_architecture   = get_model_architecture(model=model)
         save_raw_results(unique_id, "3_model_architecture", self.model_architecture)
 
-        # Save experiment-wide results (only main process): inference & compute
-        # TO DO: *SHOULD* BE PER PROCESS (THEN AVERAGED OVER PROCESSES)
+        # Save experiment-wide results (only main process):
         if accelerator.is_main_process:
+            # (i) inference metrics
             self.inference_metrics = combine_inference_metrics(raw_inference_results, accelerator)
             save_raw_results(unique_id, "4_inference_metrics", self.inference_metrics)
-            self.compute_metrics      = combine_comp_metrics(model=model, device=accelerator.device, tokenised_input_ids=input_ids, accelerator=accelerator)
-            save_raw_results(unique_id, "5_compute_metrics", self.compute_metrics)
-            logger.info("Main process saved inference and computation metrics.")
-        accelerator.print("Experiment-wide inference and compute metrics saved")
+            logger.info("Main process saved inference metrics.")
+            
+            # (ii) FLOPs
+            self.flops = get_flops(model, input_ids)
+            flops_dict = {"flops":self.flops}
+            save_raw_results(unique_id, "5_flops", flops_dict)
+            logger.info("Main process saved FLOPs metrics.")
+            
+            # (iii) global GPU utilisation
+            self.global_gpu_usage = get_global_gpu_usage()
+            save_raw_results(unique_id, "global_gpu_usage", self.global_gpu_usage)  
+            logger.info("Main process saved global GPU metrics.")
+            
+        accelerator.print("Experiment-wide metrics saved")
         accelerator.wait_for_everyone()
 
-        # Save per-process energy metrics.
+        # Save per-process metrics
+        # (i) compute metrics
+        local_compute_results = {
+            "gpu_memory": get_memory(accelerator.device),
+            "gpu_utilisation": get_gpu_utilisation(accelerator.device),
+            "cpu_utilisation": get_cpu_utilisation(),
+            }
+        save_raw_results(unique_id, "local_compute_results", local_compute_results, pid=accelerator.local_process_index)
+        setattr(self, f"{accelerator.local_process_index}local_compute_results", local_compute_results)
+        logger.info(f"Process {accelerator.local_process_index} saved its local compute metrics.")
+
+        # (ii) energy metrics.
         local_energy_results = combine_energy_metrics(codecarbon_data, accelerator)
         save_raw_results(unique_id, "local_energy_results", local_energy_results, pid=accelerator.local_process_index)
         setattr(self, f"{accelerator.local_process_index}_local_energy_results", local_energy_results)
-        logger.info(f"Process {accelerator.local_process_index} saved its energy metrics.")
+        logger.info(f"Process {accelerator.local_process_index} saved its local energy metrics.")
+        
         accelerator.wait_for_everyone()
         accelerator.print("All local process energy metrics saved")
         
         accelerator.print("Experiment finished")
 
-        return {
-            "experiment_id": unique_id,
-            "inference_metrics": self.inference_metrics if accelerator.is_main_process else None,
-            "compute_metrics": self.compute_metrics if accelerator.is_main_process else None,
-            "energy_metrics_path": f"raw_results/{unique_id}/local_energy_results_{accelerator.local_process_index}.json",
-            "raw_output_count": len(self.raw_text_outputs) if hasattr(self, "raw_text_outputs") else 0
-        }
+        return 
 
     def aggregate_results(self):     
         unique_id = self.experiment_setup.unique_id
